@@ -1,84 +1,62 @@
 // tutorial14.jsx
 
-// From tutorial14.js
-var CommentBox = React.createClass({
-  loadCommentsFromServer: function() {
-    $.ajax({
-      url: this.props.url,
-      dataType: 'json',
-      cache: false,
-      success: function(data) {
-        this.setState({data: data});
-      }.bind(this),
-      error: function(xhr, status, err) {
-        console.error(this.props.url, status, err.toString());
-      }.bind(this)
-    });
-  },
-  getInitialState: function() {
-    return {data: []};
-  },
-  componentDidMount: function() {
-    this.loadCommentsFromServer();
-    setInterval(this.loadCommentsFromServer, this.props.pollInterval);
-  },
-  render: function() {
-    return (
-      <div className="commentBox">
-        <h1>Comments</h1>
-        <CommentList data={this.state.data} />
-        <CommentForm />
-      </div>
-    );
-  }
-});
+function CommentBox(props) {
+  const [data, setData] = React.useState([]);
 
-// From tutorial10.js
-var CommentList = React.createClass({
-  render: function() {
-    var commentNodes = this.props.data.map(function (comment) {
-      return (
-        <Comment author={comment.author}>
-          {comment.text}
-        </Comment>
-      );
-    });
-    return (
-      <div className="commentList">
-        {commentNodes}
-      </div>
-    );
-  }
-});
+  React.useEffect(() => {
+    function loadCommentsFromServer() {
+      fetch(props.url)
+        .then(response => response.json())
+        .then(data => setData(data))
+        .catch(err => console.error(props.url, err.toString()));
+    }
+    loadCommentsFromServer();
+    const interval = setInterval(loadCommentsFromServer, props.pollInterval);
+    return () => clearInterval(interval);
+  }, [props.url, props.pollInterval]);
 
-// From tutorial7.js
-var Comment = React.createClass({
-  render: function() {
-    var rawMarkup = marked(this.props.children.toString(), {sanitize: true});
-    return (
-      <div className="comment">
-        <h2 className="commentAuthor">
-          {this.props.author}
-        </h2>
-        <span dangerouslySetInnerHTML={{__html: rawMarkup}} />
-      </div>
-    );
-  }
-});
+  return (
+    <div className="commentBox">
+      <h1>Comments</h1>
+      <CommentList data={data} />
+      <CommentForm />
+    </div>
+  );
+}
 
-// From tutorial2.js
-var CommentForm = React.createClass({
-  render: function() {
-    return (
-      <div className="commentForm">
-        Hello, world! I am a CommentForm.
-      </div>
-    );
-  }
-});
+function CommentList(props) {
+  const commentNodes = props.data.map((comment, index) => (
+    <Comment key={index} author={comment.author}>
+      {comment.text}
+    </Comment>
+  ));
+  return (
+    <div className="commentList">
+      {commentNodes}
+    </div>
+  );
+}
 
-// Render the CommentBox element
-React.render(
-  <CommentBox url="comments.json" pollInterval={2000} />,
-  document.getElementById('content')
+function Comment(props) {
+  const rawMarkup = marked.parse(props.children.toString());
+  return (
+    <div className="comment">
+      <h2 className="commentAuthor">
+        {props.author}
+      </h2>
+      <span dangerouslySetInnerHTML={{__html: rawMarkup}} />
+    </div>
+  );
+}
+
+function CommentForm() {
+  return (
+    <div className="commentForm">
+      Hello, world! I am a CommentForm.
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('content')).render(
+  <CommentBox url="comments.json" pollInterval={2000} />
 );
