@@ -11,6 +11,7 @@ import (
 
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/sirupsen/logrus"
+	"github.com/xyproto/algernon/cachemode"
 )
 
 // bundleCacheEntry holds bundled output alongside the source file's modification time.
@@ -25,10 +26,19 @@ type bundleCacheEntry struct {
 type bundleCache struct {
 	mu      sync.RWMutex
 	entries map[string]bundleCacheEntry
+	hits    map[string]uint64
 }
 
 func newBundleCache() *bundleCache {
-	return &bundleCache{entries: make(map[string]bundleCacheEntry)}
+	return &bundleCache{entries: make(map[string]bundleCacheEntry), hits: make(map[string]uint64)}
+}
+
+// Clear clears all entries from the bundle cache.
+func (bc *bundleCache) Clear() {
+	bc.mu.Lock()
+	bc.entries = make(map[string]bundleCacheEntry)
+	bc.hits = make(map[string]uint64)
+	bc.mu.Unlock()
 }
 
 // needsBundling reports whether the JS/JSX source requires full bundling,
@@ -39,7 +49,6 @@ func needsBundling(data []byte) bool {
 		bytes.Contains(data, []byte("require("))
 }
 
-// bundleFile bundles the given JS/JSX file using esbuild (IIFE, browser target,
 // minified) and caches the result in memory. Subsequent calls return the cached
 // output as long as the file's modification time has not changed.
 //
@@ -54,12 +63,19 @@ func (ac *Config) bundleFile(filename string, srcData []byte) ([]byte, error) {
 	}
 	modTime := info.ModTime()
 
+	useCache := !ac.noCache && ac.cacheMode != cachemode.Off
+
 	bc := ac.bundleCache
-	bc.mu.RLock()
-	entry, ok := bc.entries[filename]
-	bc.mu.RUnlock()
-	if ok && entry.modTime.Equal(modTime) {
-		return entry.data, nil
+	if useCache {
+		bc.mu.RLock()
+		entry, ok := bc.entries[filename]
+		bc.mu.RUnlock()
+		if ok && entry.modTime.Equal(modTime) {
+			bc.mu.Lock()
+			bc.hits[filename]++
+			bc.mu.Unlock()
+			return entry.data, nil
+		}
 	}
 
 	dir := filepath.Dir(filename)
@@ -107,10 +123,69 @@ func (ac *Config) bundleFile(filename string, srcData []byte) ([]byte, error) {
 
 	data := result.OutputFiles[0].Contents
 
-	bc.mu.Lock()
-	bc.entries[filename] = bundleCacheEntry{modTime: modTime, data: data}
-	bc.mu.Unlock()
+	if useCache {
+		bc.mu.Lock()
+		if ac.cacheMaxEntitySize == 0 || uint64(len(data)) <= ac.cacheMaxEntitySize {
+			if ac.bundleCacheMaxMemory == 0 || bc.BytesUsed()+uint64(len(data)) <= ac.bundleCacheMaxMemory {
+				bc.entries[filename] = bundleCacheEntry{modTime: modTime, data: data}
+				bc.hits[filename] = 0
+				logrus.Debugf("bundled and cached %s (%d bytes)", filepath.Base(filename), len(data))
+			} else {
+				for bc.BytesUsed()+uint64(len(data)) > ac.bundleCacheMaxMemory && bc.evictLocked() {
+				}
+				if bc.BytesUsed()+uint64(len(data)) <= ac.bundleCacheMaxMemory {
+					bc.entries[filename] = bundleCacheEntry{modTime: modTime, data: data}
+					bc.hits[filename] = 0
+					logrus.Debugf("bundled and cached %s (%d bytes)", filepath.Base(filename), len(data))
+				}
+			}
+		}
+		bc.mu.Unlock()
+	}
 
-	logrus.Debugf("bundled %s (%d bytes, cached)", filepath.Base(filename), len(data))
 	return data, nil
+}
+
+// BytesUsed returns the total bytes used by all entries in the bundle cache.
+func (bc *bundleCache) BytesUsed() uint64 {
+	var total uint64
+	for _, entry := range bc.entries {
+		total += uint64(len(entry.data))
+	}
+	return total
+}
+
+// evictLocked removes the least-popular entry. Must be called with bc.mu held.
+func (bc *bundleCache) evictLocked() bool {
+	if len(bc.entries) == 0 {
+		return false
+	}
+
+	var targetKey string
+	var minHits uint64 = ^uint64(0)
+	var maxSize uint64
+
+	for key, entry := range bc.entries {
+		hits := bc.hits[key]
+		size := uint64(len(entry.data))
+		if hits < minHits || (hits == minHits && size > maxSize) {
+			targetKey = key
+			minHits = hits
+			maxSize = size
+		}
+	}
+
+	if targetKey != "" {
+		delete(bc.entries, targetKey)
+		delete(bc.hits, targetKey)
+		return true
+	}
+	return false
+}
+
+// EvictLargest removes the least-popular entry from the bundle cache.
+func (bc *bundleCache) EvictLargest() bool {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return bc.evictLocked()
 }

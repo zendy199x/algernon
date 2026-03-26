@@ -98,6 +98,7 @@ type Config struct {
 	serverConfigurationFilenames []string // list of configuration filenames to check
 	cacheMaxGivenDataSize        uint64
 	largeFileSize                uint64        // threshold for not reading large files into memory
+	bundleCacheMaxMemory         uint64        // max memory for bundle cache (0 = unlimited)
 	refreshDuration              time.Duration // for the auto-refresh feature
 	redisDBindex                 int
 	cacheSize                    uint64
